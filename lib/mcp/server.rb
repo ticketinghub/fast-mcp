@@ -341,7 +341,7 @@ module FastMcp
         send_error_result(e.message, id)
       rescue StandardError => e
         @logger.error("Error calling tool #{tool_name}: #{e.message}")
-        send_error_result("#{e.message}, #{e.backtrace.join("\n")}", id)
+        send_error_result(e.message, id)
       end
     end
 
