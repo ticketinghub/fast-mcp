@@ -59,7 +59,7 @@ RSpec.describe FastMcp::OAuth::TokenValidator do
     end
 
     context 'with JWT tokens' do
-      let(:valid_jwt_header) { Base64.urlsafe_encode64(JSON.generate(typ: 'JWT', alg: 'HS256')) }
+      let(:hmac_secret) { 'test_secret' }
       let(:valid_payload) do
         {
           sub: 'user123',
@@ -67,110 +67,103 @@ RSpec.describe FastMcp::OAuth::TokenValidator do
           aud: 'mcp-api',
           exp: Time.now.to_i + 3600,
           iat: Time.now.to_i,
+          jti: SecureRandom.uuid,
+          nbf: Time.now.to_i,
           scope: 'mcp:read mcp:write'
         }
       end
-      let(:encoded_payload) { Base64.urlsafe_encode64(JSON.generate(valid_payload)) }
-      let(:signature) { 'fake_signature' }
-      let(:jwt_token) { "#{valid_jwt_header}.#{encoded_payload}.#{signature}" }
 
       it 'recognizes JWT tokens' do
+        jwt_token = JWT.encode(valid_payload, hmac_secret, 'HS256')
         expect(validator.send(:jwt_token?, jwt_token)).to be(true)
       end
 
-      it 'validates JWT tokens (simplified validation)' do
-        # Configure validator with HMAC secret for HS256 algorithm
-        validator = described_class.new(hmac_secret: 'test_secret', logger: logger)
-
-        # Mock JWT::EncodedToken to return valid payload and pass verification
-        encoded_token = instance_double(JWT::EncodedToken)
-        allow(JWT::EncodedToken).to receive(:new).with(jwt_token).and_return(encoded_token)
-        allow(encoded_token).to receive(:header).and_return({ 'alg' => 'HS256' })
-        allow(encoded_token).to receive(:payload).and_return(valid_payload.transform_keys(&:to_s))
-        allow(encoded_token).to receive(:verify!).and_return(true)
-        allow(encoded_token).to receive(:verify_claims!).and_return(true)
+      it 'validates JWT tokens' do
+        jwt_token = JWT.encode(valid_payload, hmac_secret, 'HS256')
+        validator = described_class.new(
+          hmac_secret: hmac_secret,
+          issuer: 'https://auth.example.com',
+          audience: 'mcp-api',
+          logger: logger
+        )
 
         expect(validator.validate_token(jwt_token)).to be(true)
       end
 
       it 'rejects expired JWT tokens' do
         expired_payload = valid_payload.merge(exp: Time.now.to_i - 3600)
-        expired_encoded = Base64.urlsafe_encode64(JSON.generate(expired_payload))
-        expired_jwt = "#{valid_jwt_header}.#{expired_encoded}.#{signature}"
+        expired_jwt = JWT.encode(expired_payload, hmac_secret, 'HS256')
 
-        validator = described_class.new(hmac_secret: 'test_secret', logger: logger)
-
-        # Mock JWT::EncodedToken to return expired payload and trigger expiration error
-        encoded_token = instance_double(JWT::EncodedToken)
-        allow(JWT::EncodedToken).to receive(:new).with(expired_jwt).and_return(encoded_token)
-        allow(encoded_token).to receive(:header).and_return({ 'alg' => 'HS256' })
-        allow(encoded_token).to receive(:verify!).and_return(true)
-        allow(encoded_token).to receive(:verify_claims!).and_raise(FastMcp::OAuth::TokenValidator::ExpiredTokenError, 'Token has expired')
+        validator = described_class.new(
+          hmac_secret: hmac_secret,
+          issuer: 'https://auth.example.com',
+          audience: 'mcp-api',
+          logger: logger
+        )
 
         expect(validator.validate_token(expired_jwt)).to be(false)
       end
 
       it 'validates JWT token scopes' do
-        validator = described_class.new(hmac_secret: 'test_secret', logger: logger)
-
-        # Mock JWT::EncodedToken to return valid payload and pass verification
-        encoded_token = instance_double(JWT::EncodedToken)
-        allow(JWT::EncodedToken).to receive(:new).with(jwt_token).and_return(encoded_token)
-        allow(encoded_token).to receive(:header).and_return({ 'alg' => 'HS256' })
-        allow(encoded_token).to receive(:payload).and_return(valid_payload.transform_keys(&:to_s))
-        allow(encoded_token).to receive(:verify!).and_return(true)
-        allow(encoded_token).to receive(:verify_claims!).and_return(true)
+        jwt_token = JWT.encode(valid_payload, hmac_secret, 'HS256')
+        validator = described_class.new(
+          hmac_secret: hmac_secret,
+          issuer: 'https://auth.example.com',
+          audience: 'mcp-api',
+          logger: logger
+        )
 
         expect(validator.validate_token(jwt_token, required_scopes: ['mcp:read'])).to be(true)
         expect(validator.validate_token(jwt_token, required_scopes: ['mcp:admin'])).to be(false)
       end
 
       it 'rejects JWT tokens with unallowed algorithms' do
-        validator = described_class.new(hmac_secret: 'test_secret', logger: logger)
+        # Create a JWT with RS256 (not allowed)
+        rsa_private = OpenSSL::PKey::RSA.generate(2048)
+        jwt_token = JWT.encode(valid_payload, rsa_private, 'RS256')
 
-        # Mock JWT::EncodedToken with RS256 algorithm (not in ALLOWED_ALGORITHMS)
-        encoded_token = instance_double(JWT::EncodedToken)
-        allow(JWT::EncodedToken).to receive(:new).with(jwt_token).and_return(encoded_token)
-        allow(encoded_token).to receive(:header).and_return({ 'alg' => 'RS256' })
+        validator = described_class.new(
+          hmac_secret: hmac_secret,
+          issuer: 'https://auth.example.com',
+          audience: 'mcp-api',
+          logger: logger
+        )
 
         expect(validator.validate_token(jwt_token)).to be(false)
       end
 
       it 'accepts JWT tokens with HS256 algorithm' do
-        validator = described_class.new(hmac_secret: 'test_secret', logger: logger)
-
-        encoded_token = instance_double(JWT::EncodedToken)
-        allow(JWT::EncodedToken).to receive(:new).with(jwt_token).and_return(encoded_token)
-        allow(encoded_token).to receive(:header).and_return({ 'alg' => 'HS256' })
-        allow(encoded_token).to receive(:payload).and_return(valid_payload.transform_keys(&:to_s))
-        allow(encoded_token).to receive(:verify!).and_return(true)
-        allow(encoded_token).to receive(:verify_claims!).and_return(true)
+        jwt_token = JWT.encode(valid_payload, hmac_secret, 'HS256')
+        validator = described_class.new(
+          hmac_secret: hmac_secret,
+          issuer: 'https://auth.example.com',
+          audience: 'mcp-api',
+          logger: logger
+        )
 
         expect(validator.validate_token(jwt_token)).to be(true)
       end
 
       it 'accepts JWT tokens with HS384 algorithm' do
-        validator = described_class.new(hmac_secret: 'test_secret', logger: logger)
-
-        encoded_token = instance_double(JWT::EncodedToken)
-        allow(JWT::EncodedToken).to receive(:new).with(jwt_token).and_return(encoded_token)
-        allow(encoded_token).to receive(:header).and_return({ 'alg' => 'HS384' })
-        allow(encoded_token).to receive(:payload).and_return(valid_payload.transform_keys(&:to_s))
-        allow(encoded_token).to receive(:verify!).and_return(true)
-        allow(encoded_token).to receive(:verify_claims!).and_return(true)
+        jwt_token = JWT.encode(valid_payload, hmac_secret, 'HS384')
+        validator = described_class.new(
+          hmac_secret: hmac_secret,
+          issuer: 'https://auth.example.com',
+          audience: 'mcp-api',
+          logger: logger
+        )
 
         expect(validator.validate_token(jwt_token)).to be(true)
       end
 
       it 'accepts JWT tokens with HS512 algorithm' do
-        validator = described_class.new(hmac_secret: 'test_secret', logger: logger)
-
-        encoded_token = instance_double(JWT::EncodedToken)
-        allow(JWT::EncodedToken).to receive(:new).with(jwt_token).and_return(encoded_token)
-        allow(encoded_token).to receive(:header).and_return({ 'alg' => 'HS512' })
-        allow(encoded_token).to receive(:payload).and_return(valid_payload.transform_keys(&:to_s))
-        allow(encoded_token).to receive(:verify!).and_return(true)
-        allow(encoded_token).to receive(:verify_claims!).and_return(true)
+        jwt_token = JWT.encode(valid_payload, hmac_secret, 'HS512')
+        validator = described_class.new(
+          hmac_secret: hmac_secret,
+          issuer: 'https://auth.example.com',
+          audience: 'mcp-api',
+          logger: logger
+        )
 
         expect(validator.validate_token(jwt_token)).to be(true)
       end
@@ -178,17 +171,11 @@ RSpec.describe FastMcp::OAuth::TokenValidator do
   end
 
   describe '#extract_claims' do
-    let(:jwt_header) { Base64.urlsafe_encode64(JSON.generate(typ: 'JWT', alg: 'HS256')) }
+    let(:hmac_secret) { 'test_secret' }
     let(:payload) { { sub: 'user123', scope: 'mcp:read' } }
-    let(:encoded_payload) { Base64.urlsafe_encode64(JSON.generate(payload)) }
-    let(:jwt_token) { "#{jwt_header}.#{encoded_payload}.signature" }
+    let(:jwt_token) { JWT.encode(payload, hmac_secret, 'HS256') }
 
     it 'extracts claims from JWT tokens' do
-      # Mock JWT.decode to return the payload when called without verification
-      payload_with_string_keys = payload.transform_keys(&:to_s)
-      allow(JWT).to receive(:decode).with(jwt_token, nil,
-                                          false).and_return([payload_with_string_keys, { 'alg' => 'HS256' }])
-
       claims = validator.extract_claims(jwt_token)
       expect(claims).to include('sub' => 'user123', 'scope' => 'mcp:read')
     end
@@ -222,7 +209,7 @@ RSpec.describe FastMcp::OAuth::TokenValidator do
   describe 'error handling' do
     let(:logger_output) { StringIO.new }
     let(:logger) { Logger.new(logger_output) }
-    let(:validator) { described_class.new(logger: logger, hmac_secret: 'lol') }
+    let(:validator) { described_class.new(logger: logger, hmac_secret: 'test_secret') }
 
     it 'logs validation failures' do
       # Create a malformed JWT that will trigger an error during validation
@@ -233,7 +220,7 @@ RSpec.describe FastMcp::OAuth::TokenValidator do
       expect(result).to be(false)
       logger_output.rewind
       log_content = logger_output.read
-      expect(log_content).to match(/Unexpected error during token validation: Invalid base64 encoding/)
+      expect(log_content).to match(/Token validation failed/)
     end
 
     it 'logs unexpected errors' do

@@ -70,24 +70,53 @@ module FastMcp
 
       # Check if token looks like a JWT
       def jwt_token?(token)
-        encoded_token = JWT::EncodedToken.new(token)
+        # Simple check: JWT has 3 parts separated by dots
+        parts = token.split('.')
+        return false unless parts.length == 3
 
-        !!encoded_token.header
-      rescue JSON::ParserError, JWT::DecodeError
+        # Try to decode header
+        header = JSON.parse(Base64.urlsafe_decode64(parts[0]))
+        !!header
+      rescue JSON::ParserError, ArgumentError
         false
       end
 
       # Validate JWT token
       def valid_jwt_token?(token, required_scopes: nil)
-        encoded_token = JWT::EncodedToken.new(token)
-        verify_token_signature!(encoded_token)
-        verify_token_claims!(encoded_token)
-        payload = encoded_token.payload
+        decode_options = {
+          algorithm: ALLOWED_ALGORITHMS,
+          verify_expiration: true,
+          verify_not_before: true,
+          verify_iat: true,
+          verify_jti: true,
+          leeway: @clock_skew
+        }
+
+        # Add issuer verification if configured
+        if @issuer
+          decode_options[:verify_iss] = true
+          decode_options[:iss] = @issuer
+        end
+
+        # Add audience verification if configured
+        if @audience
+          decode_options[:verify_aud] = true
+          decode_options[:aud] = @audience
+        end
+
+        payload, header = JWT.decode(token, @hmac_secret, true, decode_options)
+
+        # Verify algorithm is allowed
+        algorithm = header['alg']
+        raise InvalidTokenError, "Unallowed JWT algorithm: #{algorithm}" unless ALLOWED_ALGORITHMS.include?(algorithm)
 
         validate_token_scopes!(payload['scope'], required_scopes) if required_scopes
         validate_subject!(payload['sub']) if @subjects.any?
 
         true
+      rescue JWT::DecodeError, JWT::ExpiredSignature => e
+        raise ExpiredTokenError, e.message if e.is_a?(JWT::ExpiredSignature)
+        raise InvalidTokenError, e.message
       end
 
       # Validate opaque token using external validator
@@ -101,21 +130,6 @@ module FastMcp
         validate_token_scopes!(result[:scopes], required_scopes) if required_scopes && result[:scopes]
 
         true
-      end
-
-      # Decode and verify JWT token using proper JWT library
-      def verify_token_signature!(encoded_token)
-        header = encoded_token.header
-        algorithm = header['alg']
-
-        raise InvalidTokenError, "Unallowed JWT algorithm: #{algorithm}" unless ALLOWED_ALGORITHMS.include?(algorithm)
-
-        encoded_token.verify!(signature: { algorithm: algorithm, key: @hmac_secret })
-      end
-
-      # Validate JWT standard claims
-      def verify_token_claims!(encoded_token)
-        encoded_token.verify_claims!(:exp, :nbf, :jti, :iat, iss: [@issuer], aud: [@audience])
       end
 
       # Validate token scopes
